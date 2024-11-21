@@ -1,96 +1,123 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error
-
-# 导入 Intel Extension for PyTorch
+import numpy as np
+import torch
 import intel_extension_for_pytorch as ipex
+import torch.nn as nn
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+from torch.utils.data import Dataset, DataLoader
 
-# 1. 数据加载
-data = pd.read_csv('data.csv', encoding='utf-8', encoding_errors='ignore')
+# 1. 读取数据
+data = pd.read_csv("data.csv")
 
-# 1.1 处理类别特征，进行独热编码
-categorical_cols = ['make', 'model', 'trim', 'body', 'transmission', 'state', 'color', 'interior']
-data = pd.get_dummies(data, columns=categorical_cols)
-
-# 1.2 处理日期特征（saledate）
+# 2. 数据预处理
+# 转换日期时间列
 data['saledate'] = pd.to_datetime(data['saledate'])
-data['saleday'] = (data['saledate'] - data['saledate'].min()).dt.days
-data = data.drop(columns=['saledate'])  # 移除原始的saledate列
+data['sale_year'] = data['saledate'].dt.year
+data['sale_month'] = data['saledate'].dt.month
+data = data.drop(columns=['saledate'])
 
-# 1.3 选择特征列和目标列
-X = data.drop(columns=['sellingprice', 'mmr'])
-y = data['sellingprice']
+# 类别型变量编码
+categorical_columns = ['make', 'model', 'trim', 'body', 'transmission', 'state', 'color', 'interior']
+label_encoders = {}
+for col in categorical_columns:
+    le = LabelEncoder()
+    data[col] = le.fit_transform(data[col])
+    # 保存对应编码，方便后续逆向解码
+    label_encoders[col] = le
 
-# 1.4 数据标准化
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
+# 数值型变量归一化
+numerical_columns = ['year', 'odometer', 'mmr']
+scaler = MinMaxScaler()
+data[numerical_columns] = scaler.fit_transform(data[numerical_columns])
 
-# 2. 数据分割
-X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+# 目标变量
+target = 'sellingprice'
+features = [col for col in data.columns if col != target]
 
-# 3. 将数据转换为 PyTorch 的 tensor
-X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).view(-1, 1)
-y_test_tensor = torch.tensor(y_test.values, dtype=torch.float32).view(-1, 1)
+# 3. 数据集划分
+X = data[features].values
+y = data[target].values
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# 4. 检查是否可以使用 Intel XPU (A770)
-device = torch.device("cpu")  # 默认使用 CPU
-# 使用 Intel XPU 设备（如果你已经正确安装了 IPEX，并且系统支持）
-device = ipex.device("xpu")  # Intel XPU 设备
+# 转换为 PyTorch 数据集
+class PriceDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.float32)
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
 
-# 5. 定义神经网络模型
-class MLPRegressor(nn.Module):
-    def __init__(self, input_dim):
-        super(MLPRegressor, self).__init__()
-        self.layer1 = nn.Linear(input_dim, 128)
-        self.layer2 = nn.Linear(128, 64)
-        self.layer3 = nn.Linear(64, 32)
-        self.output = nn.Linear(32, 1)
+train_dataset = PriceDataset(X_train, y_train)
+val_dataset = PriceDataset(X_val, y_val)
 
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+# 4. 定义神经网络
+class PricePredictor(nn.Module):
+    def __init__(self, input_size):
+        super(PricePredictor, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_size, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+    
     def forward(self, x):
-        x = torch.relu(self.layer1(x))
-        x = torch.relu(self.layer2(x))
-        x = torch.relu(self.layer3(x))
-        x = self.output(x)
-        return x
+        return self.network(x)
 
-# 6. 初始化模型并迁移到 XPU
-model = MLPRegressor(input_dim=X_train.shape[1]).to(device)
+model = PricePredictor(input_size=X.shape[1])
 
-# 7. 定义损失函数和优化器
+# 5. 定义损失函数和优化器
 criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-# 使用 Intel® Extension for PyTorch 优化模型
-model = ipex.optimize(model)
+# 使用 IPEX 优化模型
+device = torch.device("xpu")  # Intel Arc GPU
+model = model.to(device)
+# model = ipex.optimize(model, dtype=torch.float32)
+model, optimizer = ipex.optimize(model, optimizer=optimizer, dtype=torch.float32)
 
-# 8. 训练模型
-epochs = 100
+# 6. 训练模型
+epochs = 50
 for epoch in range(epochs):
     model.train()
-    optimizer.zero_grad()
-    # 前向传播
-    y_pred = model(X_train_tensor.to(device))
-    # 计算损失
-    loss = criterion(y_pred, y_train_tensor.to(device))
-    # 反向传播
-    loss.backward()
-    optimizer.step()
+    train_loss = 0
+    for X_batch, y_batch in train_loader:
 
-    if (epoch+1) % 10 == 0:
-        print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
+        # 将数据移动到 XPU
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
 
-# 9. 在测试集上进行预测
-model.eval()
-with torch.no_grad():
-    y_pred_test = model(X_test_tensor.to(device))
+        optimizer.zero_grad()
+        predictions = model(X_batch).squeeze()
+        loss = criterion(predictions, y_batch)
+        loss.backward()
+        optimizer.step()
+        train_loss += loss.item()
+    train_loss /= len(train_loader)
+    
+    # 验证
+    model.eval()
+    val_loss = 0
+    with torch.no_grad():
+        for X_batch, y_batch in val_loader:
 
-# 10. 计算均方误差（MSE）
-test_loss = mean_squared_error(y_test_tensor.numpy(), y_pred_test.cpu().numpy())
-print(f"Test MSE: {test_loss:.4f}")
+            # 将验证数据移动到 XPU
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
 
+            predictions = model(X_batch).squeeze()
+            loss = criterion(predictions, y_batch)
+            val_loss += loss.item()
+    val_loss /= len(val_loader)
+    
+    print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+
+# 7. 保存模型
+torch.save(model.state_dict(), "price_predictor.pth")

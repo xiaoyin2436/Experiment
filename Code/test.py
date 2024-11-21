@@ -3,34 +3,32 @@
 
 # print("TensorFlow version:", tf.__version__)
 # print("Intel Extension for TensorFlow version:", ipex.__version__)
+# from datetime import datetime
 
-import pandas as pd
-import re
+# import pandas as pd
+# from datetime import datetime
 
-# 定义一个函数来转换原始的时间字符串为标准的 ISO 格式
-def clean_timezone(date_str):
-    # 将时区部分处理为标准格式: 例如 "GMT-0800" -> "-08:00"
-    date_str = re.sub(r' GMT([+-]\d{4})', r' \1', date_str)  # 将 GMT+0800 转换为 +08:00
-    return date_str
+# # 定义转换函数
+# def parse_custom_date(date_str):
+#     # 去掉括号和时区信息
+#     clean_str = date_str.split(" GMT")[0]
+#     # 转换为标准格式
+#     return datetime.strptime(clean_str, "%a %b %d %Y %H:%M:%S")
 
-# 读取数据
-data = pd.read_csv('data.csv')
+# # 读取 CSV 文件
+# csv_file = "data.csv"  # 替换为你的文件名
+# df = pd.read_csv(csv_file)
 
-# 清理 saledate 列中的时区部分
-data['saledate'] = data['saledate'].apply(clean_timezone)
+# # 假设时间列的列名为 'saledate'
+# # 对 'saledate' 列进行格式化转换
+# df['saledate'] = df['saledate'].apply(parse_custom_date)
+# df['saledate'] = df['saledate'].dt.strftime("%Y-%m-%d %H:%M:%S")  # 转换为标准格式
 
-# 将 saledate 列转换为 datetime 格式，使用 "%a %b %d %Y %H:%M:%S %z"
-data['saledate'] = pd.to_datetime(data['saledate'], format='%a %b %d %Y %H:%M:%S %z', errors='coerce')
+# # 保存处理后的数据到新 CSV 文件
+# output_file = "processed_file.csv"
+# df.to_csv(output_file, index=False)
 
-# 检查转换后的结果
-print(data['saledate'].head())
+# print(f"处理完成，保存到 {output_file}")
 
-# 计算 saleday（与最小日期的天数差）
-data['saleday'] = (data['saledate'] - data['saledate'].min()).dt.days
 
-# 删除原始的 saledate 列
-data = data.drop(columns=['saledate'])
-
-# 输出结果
-print(data.head())
 
