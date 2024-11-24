@@ -5,32 +5,37 @@ import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-import matplotlib.pyplot as plt
+import intel_extension_for_pytorch as ipex
 
 # 1. 读取数据
 data = pd.read_csv("data.csv")
 
 # 2. 数据预处理
+# 转换日期时间列
 data['saledate'] = pd.to_datetime(data['saledate'])
 data['sale_year'] = data['saledate'].dt.year
 data['sale_month'] = data['saledate'].dt.month
 data = data.drop(columns=['saledate'])
 
+# 类别型变量编码
 categorical_columns = ['make', 'model', 'trim', 'body', 'transmission', 'state', 'color', 'interior']
 label_encoders = {}
 for col in categorical_columns:
     le = LabelEncoder()
     data[col] = le.fit_transform(data[col])
+    # 保存对应编码，方便后续逆向解码
     label_encoders[col] = le
 
+# 数值型变量归一化
 numerical_columns = ['year', 'odometer', 'mmr']
 scaler = MinMaxScaler()
 data[numerical_columns] = scaler.fit_transform(data[numerical_columns])
 
+# 目标变量
 target = 'sellingprice'
 features = [col for col in data.columns if col != target]
 
+# 3. 数据集划分
 X = data[features].values
 y = data[target].values
 X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -68,74 +73,59 @@ class PricePredictor(nn.Module):
     def forward(self, x):
         return self.network(x)
 
-model = PricePredictor(input_size=X.shape[1])
-
 # 5. 定义损失函数和优化器
+model = PricePredictor(input_size=X.shape[1])
 criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-device = torch.device("cpu")
+# model.train()
+
+# 使用 IPEX 优化模型
+device = torch.device("xpu")  # Intel Arc GPU
 model = model.to(device)
 criterion = criterion.to(device)
 
-# 6. 训练模型和验证
-epochs = 50
-train_losses, val_losses = [], []
+# 优化模型和优化器（全精度模式）
+model, optimizer = ipex.optimize(model, optimizer=optimizer)
 
+# 6. 训练模型
+epochs = 50
 for epoch in range(epochs):
-    # 训练阶段
-    model.train()
-    train_loss = 0
+    # model.train()
+    train_loss = 0.0
+
     for X_batch, y_batch in train_loader:
-        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        # 将数据迁移到 XPU
+        X_batch = X_batch.to(device)
+        y_batch = y_batch.to(device)
+
         optimizer.zero_grad()
+
+        # 全精度模式下的预测和损失计算
         predictions = model(X_batch).squeeze()
         loss = criterion(predictions, y_batch)
+
         loss.backward()
         optimizer.step()
-        train_loss += loss.item() * X_batch.size(0)
-    train_loss /= len(train_loader.dataset)
-    train_losses.append(train_loss)
+        train_loss += loss.item()
+    
+    train_loss /= len(train_loader)
 
-    # 验证阶段
+    # 验证模型
     model.eval()
-    val_loss = 0
-    predictions, targets = [], []
+    val_loss = 0.0
     with torch.no_grad():
         for X_batch, y_batch in val_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            preds = model(X_batch).squeeze()
-            loss = criterion(preds, y_batch)
-            val_loss += loss.item() * X_batch.size(0)
-            predictions.extend(preds.cpu().numpy())
-            targets.extend(y_batch.cpu().numpy())
-    val_loss /= len(val_loader.dataset)
-    val_losses.append(val_loss)
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
 
-    print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            # 全精度模式下的验证
+            predictions = model(X_batch).squeeze()
+            loss = criterion(predictions, y_batch)
+            val_loss += loss.item()
+    val_loss /= len(val_loader)
 
-# 7. 模型评估
-predictions = np.array(predictions)
-targets = np.array(targets)
-mse = mean_squared_error(targets, predictions)
-rmse = np.sqrt(mse)
-mae = mean_absolute_error(targets, predictions)
-r2 = r2_score(targets, predictions)
 
-print("\nFinal Model Evaluation:")
-print(f"MSE: {mse:.4f}")
-print(f"RMSE: {rmse:.4f}")
-print(f"MAE: {mae:.4f}")
-print(f"R²: {r2:.4f}")
+    print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
 
-# 8. 绘制损失曲线
-plt.figure(figsize=(10, 6))
-plt.plot(train_losses, label="Train Loss")
-plt.plot(val_losses, label="Validation Loss")
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.legend()
-plt.title("Training and Validation Loss")
-plt.show()
-
-# 9. 保存模型
+# 7. 保存模型
 torch.save(model.state_dict(), "price_predictor.pth")
